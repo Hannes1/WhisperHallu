@@ -3,6 +3,8 @@ import os
 import time
 import re
 from _io import StringIO
+from threading import Lock, Thread
+lock = Lock()
  
 if sys.version_info.major == 3 and sys.version_info.minor >= 10:
     print("Python >= 3.10")
@@ -47,61 +49,23 @@ if(useDemucs):
 
 useCompressor=True
 
-try:
-    #Standard Whisper: https://github.com/openai/whisper
-    import whisper
-    print("Using standard Whisper")
-    whisperFound = "STD"
-    from pathlib import Path
-    from whisper.utils import WriteSRT
-except ImportError as e:
-    pass
+#FasterWhisper: https://github.com/guillaumekln/faster-whisper
+from faster_whisper import WhisperModel
+print("Using Faster Whisper")
+# whisperFound = "FSTR"
+# modelPath = "whisper-medium-ct2/"#"whisper-medium-ct2/" "whisper-large-ct2/"
 
-try:
-    #FasterWhisper: https://github.com/guillaumekln/faster-whisper
-    from faster_whisper import WhisperModel
-    print("Using Faster Whisper")
-    whisperFound = "FSTR"
-    modelPath = "whisper-medium-ct2/"#"whisper-medium-ct2/" "whisper-large-ct2/"
-    if not os.path.exists(modelPath):
-        print("Faster installation found, but "+modelPath+" model not found")
-        sys.exit(-1)
-except ImportError as e:
-    pass
+model_size = "large-v2"
 
-beam_size=2
-model = None
+# Run on GPU with FP16
+model = WhisperModel(model_size, device="cuda", compute_type="float16")
+
+#segments, info = model.transcribe("data/test.mp3", beam_size=5)
 device = "cuda" #cuda / cpu
 cudaIdx = 0
+beam_size = 5
 
 SAMPLING_RATE = 16000
-
-from threading import Lock, Thread
-lock = Lock()
-
-def loadModel(gpu: str,modelSize=None):
-    global model
-    global device
-    global cudaIdx
-    cudaIdx = gpu
-    try:
-        if whisperFound == "FSTR":
-            if(modelSize == "large"):
-                modelPath = "whisper-large-ct2/"
-            else:
-                modelPath = "whisper-medium-ct2/"
-            print("LOADING: "+modelPath+" GPU: "+gpu+" BS: "+str(beam_size))
-            compute_type="float16"# float16 int8_float16 int8
-            model = WhisperModel(modelPath, device=device,device_index=int(gpu), compute_type=compute_type)
-        elif whisperFound == "STD":
-            if(modelSize == None):
-                modelSize="medium"#"tiny"#"medium" #"large"
-            print("LOADING: "+modelSize+" GPU:"+gpu+" BS: "+str(beam_size))
-            model = whisper.load_model(modelSize,device=torch.device("cuda:"+gpu)) #May be "cpu"
-        print("LOADED")
-    except:
-        print("Can't load Whisper model: "+modelSize)
-        sys.exit(-1)
 
 def getDuration(aLog:str):
     with open(aLog) as f:
@@ -119,7 +83,6 @@ def formatTimeStamp(aT=0):
 
 def getPrompt(lng:str):
     if(lng == "en"):
-        aOk=""
         return "Whisper, Ok. "\
             +"A pertinent sentence for your purpose in your language. "\
             +"Ok, Whisper. Whisper, Ok. Ok, Whisper. Whisper, Ok. "\
@@ -166,7 +129,7 @@ def transcribePrompt(path: str,lng: str,prompt=None,lngInput=None,isMusic=False,
         if(not isMusic):
             prompt=getPrompt(lng)
         else:
-            prompt="";
+            prompt=""
     
     print("=====transcribePrompt",flush=True)
     print("PATH="+path,flush=True)
@@ -221,7 +184,8 @@ def transcribeOpts(path: str,opts: dict,lngInput=None,isMusic=False,addSRT=False
         #aCmd = "python -m demucs --two-stems=vocals -d "+device+":"+cudaIdx+" --out "+demucsDir+" "+pathIn
         #print("CMD: "+aCmd)
         #os.system(aCmd)
-        demucs_audio(pathIn=pathIn,model=modelDemucs,device="cuda:"+cudaIdx,pathVocals=pathDemucs,pathOther=pathIn+".other.wav")
+        #print("cuda:"+cudaIdx)
+        demucs_audio(pathIn=pathIn,model=modelDemucs,device="cuda",pathVocals=pathDemucs,pathOther=pathIn+".other.wav")
         print("T=",(time.time()-startTime))
         print("PATH="+pathDemucs,flush=True)
         pathNoCut = pathIn = pathDemucs
@@ -346,8 +310,6 @@ def transcribeMARK(path: str,opts: dict,mode = 1,lngInput=None,aLast=None,isMusi
         transcribe_options = dict(**opts)#avoid to add beam_size opt several times
         if beam_size > 1:
             transcribe_options = dict(beam_size=beam_size,**opts)
-        
-        if whisperFound == "FSTR":
             segments, info = model.transcribe(pathIn,**transcribe_options)
             result = {}
             result["text"] = ""
@@ -359,21 +321,7 @@ def transcribeMARK(path: str,opts: dict,mode = 1,lngInput=None,aLast=None,isMusi
             else:
                 for segment in segments:
                     result["text"] += segment.text
-        else:
-            transcribe_options = dict(task="transcribe", **transcribe_options)
-            result = model.transcribe(pathIn,**transcribe_options)
-            if(mode == 3):
-                p = Path(pathIn)
-                writer = WriteSRT(p.parent)
-                writer(result, pathIn)
-                audio_basename = os.path.basename(pathIn)
-                audio_basename = os.path.splitext(audio_basename)[0]
-                output_path = os.path.join(
-                    p.parent, audio_basename + ".srt"
-                    )
-                with open(output_path) as f:
-                    result["text"] = f.read()
-        
+  
         print("T=",(time.time()-startTime))
         print("TRANS="+result["text"],flush=True)
     except Exception as e: 
